@@ -65,13 +65,29 @@ export function checkCatalogueQuota(records,mod){
   }
   if(records.length>200||total>GITHUB_LIMITS.totalBytes)fail('Пилотный каталог превышает лимит 200 работ / 200 МиБ.');
 }
+export async function quotaRecords(root){
+  const manifest=JSON.parse(await fs.readFile(path.join(root,'marketplace/owners.json'),'utf8'));
+  if(manifest?.schema_version!==1||!Array.isArray(manifest.owners)||manifest.owners.length>200)fail('Некорректный реестр принятых заявок.');
+  const names=(await fs.readdir(path.join(root,'marketplace/submissions'))).filter(x=>x!=='README.md');
+  const ids=new Set();
+  const records=manifest.owners.map(x=>{
+    if(!idValid(x.id)||ids.has(x.id)||!Number.isSafeInteger(x.source_pr)||x.source_pr<1
+      ||typeof x.created_at!=='string'||x.created_at.length>40||!Number.isFinite(Date.parse(x.created_at))
+      ||!Number.isSafeInteger(x.package_bytes)||x.package_bytes<1||x.package_bytes>10*1024*1024
+      ||!Number.isSafeInteger(x.preview_bytes)||x.preview_bytes<1||x.preview_bytes>512*1024)fail('Некорректные квоты реестра принятых заявок.');
+    ids.add(x.id);return {id:x.id,github_login:githubLogin(x.login),created_at:x.created_at,package_bytes:x.package_bytes,preview_bytes:x.preview_bytes};
+  });
+  if(names.length!==ids.size||names.some(x=>!submissionPath('marketplace/submissions/'+x)||!ids.has(path.basename(x,'.json'))))
+    fail('Дождитесь успешного обновления каталога после предыдущего слияния и повторите проверку PR.');
+  return records;
+}
 export async function validatePullRequest(service,number,root='.'){
   const mod=moderation(JSON.parse(await fs.readFile(path.join(root,'marketplace/moderation.json'),'utf8')));
   const {pr,checked,identity}=await verifyPr(service,number);await dailyQuota(service,pr);
   if(mod.banned_authors.includes(identity.login))fail('Автор заблокирован владельцем маркета.');
-  const catalog=validateCatalog(JSON.parse(await fs.readFile(path.join(root,'marketplace/catalog.json'),'utf8')));
-  if(catalog.items.some(x=>x.id===checked.meta.requestId))fail('Этот номер публикации уже существует.');
-  checkCatalogueQuota([...catalog.items,publicationRecord(checked,identity)],mod);
+  const records=await quotaRecords(root);
+  if(records.some(x=>x.id===checked.meta.requestId))fail('Этот номер публикации уже существует.');
+  checkCatalogueQuota([...records,publicationRecord(checked,identity)],mod);
   return {id:checked.meta.requestId,login:identity.login};
 }
 export async function compileCatalog(service,root='.',{proofForFile}={}){
@@ -107,7 +123,7 @@ export async function compileCatalog(service,root='.',{proofForFile}={}){
     await fs.writeFile(path.join(root,...r.package_path.split('/')),c.packageData,{mode:0o644});
     await fs.writeFile(path.join(root,...r.preview_path.split('/')),c.previewData,{mode:0o644});
   }
-  const owners={schema_version:1,owners:records.map(r=>({id:r.id,login:r.github_login,source_pr:r.source_pr}))};
+  const owners={schema_version:1,owners:records.map(r=>({id:r.id,login:r.github_login,source_pr:r.source_pr,created_at:r.created_at,package_bytes:r.package_bytes,preview_bytes:r.preview_bytes}))};
   await fs.writeFile(path.join(base,'catalog.json'),JSON.stringify(catalogue,null,2)+'\n');
   await fs.writeFile(path.join(base,'owners.json'),JSON.stringify(owners,null,2)+'\n');return catalogue;
 }
